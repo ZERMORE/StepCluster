@@ -25,7 +25,7 @@
 - 默认 `PROMPT=auto`：存在 chat template 时用其包装作者 `cot` 提示，适配 Qwen Instruct；否则使用纯文本。默认 greedy decoding，在 EOS 或完整的 `#### <answer>` 行结束时停止，避免答完后反复续写。停止规则不读取参考答案，不会在答案第一个数字处停止。若答案没有换行则等待 EOS 或预算上限。`PROMPT=plain STOP_MODE=eos` 保留旧生成协议。这是明确的 Qwen 适配变体，必须另设 `RUN_NAME`，不能混合旧结果或宣称原论文完全相同的生成协议。
 - GSM8K 优先离线复用 HF 缓存。原始 JSONL 可手工指定。已导出的完整 MATH 可复用为 `math-full`，但 MATH-500 是指定的 500 题 benchmark，不能用完整 MATH 的前 500 条代替。
 - `extract` 默认 `author-hidden` 兼容作者 `hidden_states[layer+1]`：最后一层使用 final norm 后的状态，其他层使用 block 输出。HF Llama/Qwen 的最后一个 hidden_states 实际经过 final norm，作者将其通称 resid_post。`STATE=resid-post` 则在所有层取真正 pre-final-norm block 输出。两者应放不同实验目录。
-- 本工程通过 token offsets 严格对齐 Step/#### 起点，存其前一 token 激活。与作者部分基于字符串前缀长度的定位实现有细节差异。tokenizer decode/encode 不一致会报错，避免悄悄错位。
+- 本工程通过 token offsets 严格对齐 Step/#### 起点，存其前一 token 激活。与作者部分基于字符串前缀长度的定位实现有细节差异。extract 入口使用独立包装器：重新编码一致时直接使用 fast offsets；不一致时严格从原始 ByteLevel token 字节重建文本，再映射原始 token。无法验证时仍报错。恢复方式见 [token 对齐修复](RECOVER_TOKEN_ALIGNMENT.md)，原 pipeline.py 和生成签名保持不变。
 - t-SNE 使用作者原始入口及其随机种子，Qwen 用实际层数的通用绘图入口，避免原论文四幅图入口硬编码 31 层。不按 t-SNE 二维聚类拟合检测器。
 - 每题生成 JSON 原子落盘，重启保持全部配置及代码相同即可跳过完整题目。提取阶段聚合 NPZ 只有全部完成后才保存，中断提取会重新运行提取阶段。
 - 原生步骤 probe 按状态样本随机分割，同题不同步骤可能跨划分。原生正确性预测器主要使用训练语料内部划分，best layer 有探索性。请同时运行 heldout 做独立题目评估，禁止在 test 上选层、阈值、alpha。
