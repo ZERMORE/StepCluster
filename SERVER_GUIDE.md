@@ -1,5 +1,54 @@
 # StepCluster 服务器操作指引
 
+## 重复输出修复后重新验证
+
+旧纯文本 smoke 中出现答完后重复续写直至 2048 token；新版默认自动使用聊天模板，并在完整最终答案行或 EOS 停止。保留旧结果，使用新目录重新生成。不要只提取旧生成。
+
+本地 PowerShell（提交前可查看 `git diff`）：
+
+```powershell
+cd E:\Research\LLMCoT\methods\StepCluster
+git add scripts/pipeline.py scripts/run.sh scripts/check.py README.md SERVER_GUIDE.md
+git commit -m "Fix chat prompting and final answer stopping for generation"
+git push origin codex/stepcluster-reproduction
+```
+
+服务器：
+
+```bash
+cd ~/projects/StepCluster
+conda activate stepcluster
+git pull --ff-only origin codex/stepcluster-reproduction
+export DATA_ROOT=/mnt/data/wxh/wdl
+export STEP_ROOT="$DATA_ROOT/results/StepCluster"
+export CUDA_VISIBLE_DEVICES=6  # 改为确认空闲的 GPU
+export PROMPT=chat
+export STOP_MODE=final-line
+export SMOKE_NAME=qwen25-smoke-chat-v2
+bash scripts/background.sh smoke gsm8k test
+```
+
+最后一行已使用 nohup + setsid，断开 SSH 后继续运行；按其打印的 `tail` 命令查看进度，Ctrl+C 只退出查看。无需再次安装依赖。若此目录已经用其他版本生成过，换一个新的 SMOKE_NAME。
+
+完成后检查：
+
+```bash
+python - <<'PY'
+import json, os
+from pathlib import Path
+from collections import Counter
+p = Path(os.environ['STEP_ROOT']) / os.environ['SMOKE_NAME'] / 'gsm8k/test'
+rows = [json.loads(f.read_text()) for f in (p/'merged').glob('*.json')]
+print('samples:', len(rows))
+print('stop reasons:', dict(Counter(r['stop_reason'] for r in rows)))
+print('truncated:', sum(r['truncated'] for r in rows))
+print('tokens:', [r['generated_tokens'] for r in rows])
+print((p/'extraction.json').read_text())
+PY
+```
+
+确认停止原因、格式与剔除率后，正式实验使用统一的新 RUN_NAME，例如 `qwen25-chat-v2`，依次 generate/extract train、validation、test，再运行分析。所有划分须用同样的 PROMPT 和 STOP_MODE；8 题 smoke 只用于检查流程。保留原论文纯文本协议可设置 `PROMPT=plain STOP_MODE=eos` 并使用不同目录。该修复仅作用于适配器 generate，作者 steering 入口仍需单独核对其生成协议。
+
 ## 1. 本地同步
 
 本地完整项目位于 `E:\Research\LLMCoT\methods\StepCluster`。作者源码已随工程保存，无需服务器再克隆作者仓库。

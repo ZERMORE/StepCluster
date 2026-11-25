@@ -30,14 +30,14 @@ case "$phase" in
   generate|extract)
     args=(--task "$task" --split "$split" --model "$MODEL_PATH")
     if [[ "$phase" == generate ]]; then
-      args+=(--limit "${LIMIT:-0}" --max-tokens "${MAX_TOKENS:-2048}" --prompt "${PROMPT:-plain}")
+      args+=(--limit "${LIMIT:-0}" --max-tokens "${MAX_TOKENS:-2048}" --prompt "${PROMPT:-auto}" --stop-mode "${STOP_MODE:-final-line}")
     else
       args+=(--state "${STATE:-author-hidden}")
     fi
     "${pipe[@]}" "$phase" "${args[@]}"
     ;;
   smoke)
-    export RUN_NAME="${SMOKE_NAME:-qwen25-smoke}"
+    export RUN_NAME="${SMOKE_NAME:-qwen25-smoke-chat-v2}"
     LIMIT=8 bash scripts/run.sh generate "$task" test
     bash scripts/run.sh extract "$task" test
     bash scripts/run.sh tsne "$task" test

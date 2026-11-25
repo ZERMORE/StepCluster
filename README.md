@@ -22,7 +22,7 @@
 ## 配置与复现边界
 
 - 立即可运行的默认实验使用服务器已有 Qwen2.5-7B-Instruct，属于跨模型方法复现。原论文三个变体为 Llama-3.1-8B、Llama-3.1-8B-Instruct、DeepSeek-R1-Distill-Llama-8B。Llama-3.2 或 Qwen 都不能作为原论文同模型复现。
-- 默认纯文本 `cot` 提示和 `####` 标记直接调用作者函数，greedy decoding。`PROMPT=chat` 是明确的额外变体，应另设 `RUN_NAME`。原 OOD 的 few-shot/chat 回答不能当作新固定 Step 协议下的生成结果。
+- 默认 `PROMPT=auto`：存在 chat template 时用其包装作者 `cot` 提示，适配 Qwen Instruct；否则使用纯文本。默认 greedy decoding，在 EOS 或完整的 `#### <answer>` 行结束时停止，避免答完后反复续写。停止规则不读取参考答案，不会在答案第一个数字处停止。若答案没有换行则等待 EOS 或预算上限。`PROMPT=plain STOP_MODE=eos` 保留旧生成协议。这是明确的 Qwen 适配变体，必须另设 `RUN_NAME`，不能混合旧结果或宣称原论文完全相同的生成协议。
 - GSM8K 优先离线复用 HF 缓存。原始 JSONL 可手工指定。已导出的完整 MATH 可复用为 `math-full`，但 MATH-500 是指定的 500 题 benchmark，不能用完整 MATH 的前 500 条代替。
 - `extract` 默认 `author-hidden` 兼容作者 `hidden_states[layer+1]`：最后一层使用 final norm 后的状态，其他层使用 block 输出。HF Llama/Qwen 的最后一个 hidden_states 实际经过 final norm，作者将其通称 resid_post。`STATE=resid-post` 则在所有层取真正 pre-final-norm block 输出。两者应放不同实验目录。
 - 本工程通过 token offsets 严格对齐 Step/#### 起点，存其前一 token 激活。与作者部分基于字符串前缀长度的定位实现有细节差异。tokenizer decode/encode 不一致会报错，避免悄悄错位。
@@ -38,6 +38,8 @@
 默认 `$DATA_ROOT/results/StepCluster/$RUN_NAME/$TASK/`。
 
 `train|validation|test/merged/` 保存输入 token、完整生成、答案和正确性；`activations.npz` 保存全部层的步骤边界及答案边界向量；`extraction.json` 保存剔除记录及来源。`tsne-*`、`step-probes-*`、`distances-*`、`predictors-*`、`heldout-*`、`ideal-*`、`steer-*` 各自保存图表或数值结果。HF 缓存仍在既有数据盘位置。常见 28 层、3584 维、每题约 5 个边界，float32 边界数据约 2 MB/题，具体随步数变化。不会保存全部 token 的全词表 logits。
+
+每题还记录 `stop_reason`（`eos` / `final_answer_line` / `max_tokens` / `other`）、`generated_tokens`、`prompt_mode`。最终答案行主动停止不标为 truncated；预算耗尽且没有完成停止条件才标为 truncated。仍需查看 extraction.json 的剔除率：聊天模板和停止规则不能保证每题都遵循格式，也不能保证推理正确。完整答案须写在一个非空行内；跨行数学答案应使用 `STOP_MODE=eos` 并单独命名实验。作者原生 steering 入口仍使用作者自己的生成循环，未自动应用适配器停止规则，比较干预前后时需额外核对生成协议。
 
 ## 来源
 

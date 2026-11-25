@@ -127,6 +127,33 @@ def load_lm(model_path):
     return model, tokenizer
 
 
+def final_answer_line_complete(text):
+    """Stop only after a nonempty final-answer line ends, never at its first digit."""
+    marker = text.find("####")
+    if marker < 0:
+        return False
+    tail = text[marker + 4:]
+    for line in tail.splitlines(keepends=True):
+        payload = line.strip().strip("#").strip()
+        if payload:
+            return line.endswith(("\n", "\r"))
+    return False
+
+
+class FinalAnswerLineStop:
+    """Single-response stopping criterion; uses generated text, never the reference."""
+    def __init__(self, tokenizer, prefix):
+        self.tokenizer, self.prefix = tokenizer, prefix
+        self.finished = False
+
+    def __call__(self, input_ids, scores, **kwargs):
+        import torch
+        text = self.tokenizer.decode(input_ids[0, self.prefix:].tolist(),
+                                     skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        self.finished = final_answer_line_complete(text)
+        return torch.tensor([self.finished], device=input_ids.device, dtype=torch.bool)
+
+
 def generate(args):
     import torch
     from tqdm import tqdm
@@ -137,12 +164,20 @@ def generate(args):
     config = {"model": str(Path(args.model).resolve()), "model_config": sha(Path(args.model)/"config.json"),
               "dataset": sha(args.root / "datasets" / args.task / (args.split + ".jsonl")),
               "limit": args.limit, "seed": args.seed, "max_new_tokens": args.max_tokens,
-              "prompt": args.prompt, "adapter": sha(__file__)}
+              "prompt": args.prompt, "stop_mode": args.stop_mode, "adapter": sha(__file__)}
     manifest = cell / "generation.json"
     if manifest.exists() and read_json(manifest)["config"] != config:
         raise ValueError("Generation configuration changed; use another --name")
     write_json(manifest, {"config": config, "complete": False})
     model, tokenizer = load_lm(args.model)
+    prompt_mode = args.prompt
+    if prompt_mode == "auto":
+        prompt_mode = "chat" if getattr(tokenizer, "chat_template", None) else "plain"
+    # Greedy decoding should not inherit sampling-only settings from Qwen's checkpoint.
+    model.generation_config.temperature = 1.0
+    model.generation_config.top_p = 1.0
+    model.generation_config.top_k = 50
+    print(f"Generation: prompt={prompt_mode}, stop={args.stop_mode}, greedy=True", flush=True)
     torch.manual_seed(args.seed)
     for row in tqdm(records, desc=f"{args.task}/{args.split}"):
         output = cell / "merged" / f"gsm8k_{row['id']}.json"
@@ -150,14 +185,21 @@ def generate(args):
             read_json(output)
             continue
         prompt = utils.format_prompt(row["question"], template="cot")
-        if args.prompt == "chat":
+        if prompt_mode == "chat":
             prompt = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=args.prompt == "plain").to(model.device)
+        inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=prompt_mode == "plain").to(model.device)
+        prefix = inputs.input_ids.shape[1]
+        stopper = FinalAnswerLineStop(tokenizer, prefix)
+        stop_options = {"stopping_criteria": [stopper]} if args.stop_mode == "final-line" else {}
         with torch.inference_mode():
             ids = model.generate(**inputs, max_new_tokens=args.max_tokens, do_sample=False,
-                                 use_cache=True, pad_token_id=tokenizer.eos_token_id)[0]
-        prefix = inputs.input_ids.shape[1]
+                                 use_cache=True, pad_token_id=tokenizer.eos_token_id, **stop_options)[0]
         generated = ids[prefix:].tolist()
+        eos = model.generation_config.eos_token_id
+        eos_ids = set(eos if isinstance(eos, (list, tuple)) else [eos])
+        ended_eos = bool(generated) and generated[-1] in eos_ids
+        truncated = len(generated) >= args.max_tokens and not ended_eos and not stopper.finished
+        stop_reason = "final_answer_line" if stopper.finished else "eos" if ended_eos else "max_tokens" if truncated else "other"
         text = tokenizer.decode(generated, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         raw = tokenizer.decode(generated, skip_special_tokens=False, clean_up_tokenization_spaces=False)
         parsed = utils.extract_answer(text, task="gsm8k" if args.task == "gsm8k" else "math-500")
@@ -172,7 +214,8 @@ def generate(args):
         write_json(output, {**row, "produced_text": text, "decoded_with_specials": raw,
                    "input_ids": inputs.input_ids[0].tolist(), "full_seq_ids": ids.tolist(),
                    "dp1_idx": prefix - 1, "produced_answer": parsed, "gold_answer": gold,
-                   "is_correct": correct, "truncated": len(generated) >= args.max_tokens and generated[-1] not in set(model.generation_config.eos_token_id if isinstance(model.generation_config.eos_token_id,list) else [model.generation_config.eos_token_id])})
+                   "is_correct": correct, "truncated": truncated, "stop_reason": stop_reason,
+                   "generated_tokens": len(generated), "prompt_mode": prompt_mode})
     write_json(manifest, {"config": config, "complete": True, "n": len(records)})
 
 
@@ -309,7 +352,8 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--prompt", choices=["plain", "chat"], default="plain")
+    parser.add_argument("--prompt", choices=["auto", "plain", "chat"], default="auto")
+    parser.add_argument("--stop-mode", choices=["final-line", "eos"], default="final-line")
     parser.add_argument("--state", choices=["author-hidden", "resid-post"], default="author-hidden")
     parser.add_argument("--script")
     args, rest = parser.parse_known_args()

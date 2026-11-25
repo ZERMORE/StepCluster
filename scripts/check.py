@@ -52,6 +52,9 @@ def adapter_roundtrip(pipe, temp):
             return Inputs({k:v.to(device) for k,v in self.items()})
     class Tokenizer:
         eos_token_id=0
+        chat_template='test-template'
+        def apply_chat_template(self,messages,**kwargs):
+            return 'USER: '+messages[0]['content']+'\nASSISTANT: '
         def __call__(self,text,return_tensors=None,**kwargs):
             ids=[ord(c) for c in text]
             if return_tensors:
@@ -78,8 +81,13 @@ def adapter_roundtrip(pipe, temp):
         generation_config=SimpleNamespace(eos_token_id=0)
         model=Backbone()
         def generate(self,input_ids,**kwargs):
-            suffix='Step 1: 2 + 2 = 4.\nStep 2: verify.\n#### 4'+chr(0)
-            return torch.cat([input_ids,torch.tensor([[ord(c) for c in suffix]])],dim=1)
+            suffix='Step 1: 2 + 2 = 4.\nStep 2: verify.\n#### 4\nREPEATED ANSWER'+chr(0)
+            result=input_ids
+            for c in suffix[:kwargs['max_new_tokens']]:
+                result=torch.cat([result,torch.tensor([[ord(c)]])],dim=1)
+                if any(bool(stop(result,None).all()) for stop in kwargs.get('stopping_criteria',[])) or ord(c)==0:
+                    break
+            return result
     checkpoint=temp/'checkpoint'
     checkpoint.mkdir()
     (checkpoint/'config.json').write_text('{}')
@@ -87,7 +95,7 @@ def adapter_roundtrip(pipe, temp):
     dataset.mkdir(parents=True)
     (dataset/'test.jsonl').write_text(json.dumps({'id':0,'question':'2+2?','answer':'#### 4'})+'\n')
     args=SimpleNamespace(root=temp/'adapter',name='tiny',task='gsm8k',split='test',model=str(checkpoint),
-                         limit=0,seed=42,max_tokens=256,prompt='plain',state='author-hidden')
+                         limit=0,seed=42,max_tokens=256,prompt='auto',stop_mode='final-line',state='author-hidden')
     pipe.load_lm=lambda _: (Model(),Tokenizer())
     original=pipe.module
     def load(name,path):
@@ -106,8 +114,28 @@ def adapter_roundtrip(pipe, temp):
         assert data['step_numbers'][0].tolist()==[1,2]
         assert data['is_correct_hash'][0].tolist()==[True]
         row=pipe.read_json(temp/'adapter/tiny/gsm8k/test/merged/gsm8k_0.json')
+        assert row['stop_reason']=='final_answer_line' and not row['truncated']
+        assert row['prompt_mode']=='chat' and 'REPEATED' not in row['produced_text']
         expected=row['input_ids'][-1]+1
         assert np.all(data['step_activations'][0,0]==expected)
+    # Complete answer at the exact budget is not a truncation; unfinished answer is.
+    args.name='exact-budget'
+    args.max_tokens=row['generated_tokens']
+    pipe.generate(args)
+    exact=pipe.read_json(temp/'adapter/exact-budget/gsm8k/test/merged/gsm8k_0.json')
+    assert not exact['truncated'] and exact['stop_reason']=='final_answer_line'
+    args.name='short-budget'
+    args.max_tokens=3
+    pipe.generate(args)
+    short=pipe.read_json(temp/'adapter/short-budget/gsm8k/test/merged/gsm8k_0.json')
+    assert short['truncated'] and short['stop_reason']=='max_tokens'
+    args.name='plain-eos'
+    args.max_tokens=256
+    args.prompt='plain'
+    args.stop_mode='eos'
+    pipe.generate(args)
+    plain=pipe.read_json(temp/'adapter/plain-eos/gsm8k/test/merged/gsm8k_0.json')
+    assert plain['stop_reason']=='eos' and plain['prompt_mode']=='plain'
 
 
 def main():
@@ -122,6 +150,10 @@ def main():
     positions,steps=pipe.marker_positions(text,offsets,7)
     assert steps==[1,2] and positions==[7,22,36]
     assert pipe.marker_positions("Step 2: x\n#### 1",[(i,i+1) for i in range(18)],7)==([],[])
+    for text in ('Step 1: x\n####', '#### 4', '####\n', 'No marker\n'):
+        assert not pipe.final_answer_line_complete(text)
+    for text in ('#### 42\n', '####\n42\n', '#### \\boxed{42}\n', '#### 4\r\n'):
+        assert pipe.final_answer_line_complete(text)
     env=dict(os.environ,MPLBACKEND="Agg",PYTHONIOENCODING="utf-8",OMP_NUM_THREADS="2")
     with tempfile.TemporaryDirectory(prefix="stepcluster-check-") as temp:
         temp=Path(temp)
