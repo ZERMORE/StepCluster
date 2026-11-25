@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+*.log
+output/
+logs/
+runtime/
+datasets/
+*.npz
+*.pt
+*.pkl
+.DS_Store
+upstream/
+vendor/
