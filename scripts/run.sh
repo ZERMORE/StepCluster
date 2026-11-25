@@ -31,6 +31,7 @@ case "$phase" in
     args=(--task "$task" --split "$split" --model "$MODEL_PATH")
     if [[ "$phase" == generate ]]; then
       args+=(--limit "${LIMIT:-0}" --max-tokens "${MAX_TOKENS:-2048}" --prompt "${PROMPT:-auto}" --stop-mode "${STOP_MODE:-final-line}")
+      pipe=(python -u scripts/generate_safe.py)
     else
       args+=(--state "${STATE:-author-hidden}")
       pipe=(python -u scripts/extract_aligned.py)
